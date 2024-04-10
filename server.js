@@ -16,32 +16,29 @@ app.use('/images', express.static('images'));
 
 const SECRET_KEY = 'APIKEY';
 
-const userSchema = mongoose.Schema(
-  {
-    name: { type: String, required: true },
-    email: { type: String, required: true },
-    pass: { type: String, required: true },
-    role: { type: String, required: true, default: 'user' },
-  },
-  { timestamps: true }
-);
+const userSchema = mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true }, // Ensure unique email addresses
+  pass: { type: String, required: true },
+  role: { type: String, required: true, default: 'user' },
+}, { timestamps: true });
 
 const userModel = mongoose.model('users', userSchema);
 
-const postSchema = mongoose.Schema(
-  {
-    item: { type: String, required: true },
-    file: { type: String },
-    userId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'users',
-      required: true,
-    },
-  },
-  { timestamps: true }
-);
+const todoSchema = mongoose.Schema({
+  task: { type: String, required: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'users', required: true },
+}, { timestamps: true });
 
-const postModel = mongoose.model('posts', postSchema);
+const todoModel = mongoose.model('todos', todoSchema);
+
+const productSchema = mongoose.Schema({
+  name: { type: String, required: true },
+  description: { type: String },
+  price: { type: Number, required: true },
+}, { timestamps: true });
+
+const productModel = mongoose.model('products', productSchema);
 
 app.listen(8080, () => {
   console.log('Server Started on port 8080');
@@ -49,23 +46,22 @@ app.listen(8080, () => {
 
 app.post('/signup', async (req, res) => {
   const { email, name, pass, role } = req.body;
-  const existingUser = await userModel.findOne({ email: email });
-  if (existingUser) {
-    return res.status(400).json({ message: 'User Already Exist' });
-  } else {
+  try {
+    const existingUser = await userModel.findOne({ email: email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'User Already Exists' });
+    }
     const hashedPassword = await bcrypt.hash(pass, 10);
-    const result = await userModel.create({
+    const newUser = await userModel.create({
       name: name,
       pass: hashedPassword,
       email: email,
       role: role,
     });
-
-    const token = jwt.sign(
-      { email: result.email, role: result.role, id: result._id },
-      SECRET_KEY
-    );
-    res.status(201).json({ user: result, token: token });
+    const token = jwt.sign({ email: newUser.email, role: newUser.role, id: newUser._id }, SECRET_KEY);
+    res.status(201).json({ user: newUser, token: token });
+  } catch (error) {
+    res.status(500).json({ message: 'Internal Server Error' });
   }
 });
 
@@ -80,83 +76,80 @@ app.post('/signin', async (req, res) => {
     if (!matchPassword) {
       return res.status(400).json({ message: 'Invalid Password' });
     }
-
-    const token = jwt.sign(
-      {
-        email: existingUser.email,
-        role: existingUser.role,
-        id: existingUser._id,
-      },
-      SECRET_KEY
-    );
-
-    res.status(201).json({ user: existingUser, token: token });
-  } catch (err) {
-    res.status(400).json({ message: 'Something went wrong' });
+    const token = jwt.sign({ email: existingUser.email, role: existingUser.role, id: existingUser._id }, SECRET_KEY);
+    res.status(200).json({ user: existingUser, token: token });
+  } catch (error) {
+    res.status(500).json({ message: 'Internal Server Error' });
   }
 });
 
 const auth = (req, res, next) => {
-  let token = req.headers.authorization;
-  if (token) {
-    try {
-      token = token.split(' ')[1];
-      let user = jwt.verify(token, SECRET_KEY);
-      req.userId = user.id;
-      req.role = user.role;
-      next();
-    } catch (err) {
-      res.status(400).json({ message: 'Something Went Wrong' });
-    }
-  } else {
-    res.status(400).json({ message: 'Invalid User' });
+  const token = req.headers.authorization;
+  if (!token) return res.status(401).json({ message: 'Unauthorized Access' });
+  try {
+    const decoded = jwt.verify(token.split(' ')[1], SECRET_KEY);
+    req.userId = decoded.id;
+    req.role = decoded.role;
+    next();
+  } catch (error) {
+    res.status(401).json({ message: 'Unauthorized Access' });
   }
 };
 
-app.get('/', auth, async (req, res) => {
-  if (req.role !== 'user') {
-    res.status(400).json({ message: 'Unauthorized Access' });
-  } else {
-    const item = await postModel.aggregate([
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'userId',
-          foreignField: '_id',
-          as: 'users',
-        },
-      },
-      { $sort: { _id: -1 } },
-    ]);
-
-    res.status(200).json(item);
+app.get('/todos', auth, async (req, res) => {
+  try {
+    const tasks = await todoModel.find({ userId: req.userId }).sort({ createdAt: -1 });
+    res.status(200).json(tasks);
+  } catch (error) {
+    res.status(500).json({ message: 'Internal Server Error' });
   }
 });
 
-app.get('/post', auth, async (req, res) => {
-  if (req.role !== 'user') {
-    res.status(400).json({ message: 'Unauthorized Access' });
-  } else {
-    const item = await postModel.find({ userId: req.userId });
-    console.log(item);
-    res.status(200).json(item);
+app.post('/todos', auth, async (req, res) => {
+  try {
+    const newTodo = new todoModel({
+      task: req.body.task,
+      userId: req.userId,
+    });
+    await newTodo.save();
+    res.status(201).json(newTodo);
+  } catch (error) {
+    res.status(500).json({ message: 'Internal Server Error' });
   }
 });
 
-app.delete('/delete/:id', auth, async (req, res) => {
-  if (req.role !== 'user') {
-    res.status(400).json({ message: 'Unauthorized Access' });
-  } else {
-    const del_file = await postModel.findOne({ _id: req.params.id });
-    if (del_file.file) {
-      const fname = 'images/' + del_file.file.split('/').pop();
-      fs.unlink(fname, function (err) {
-        if (err) throw err;
-        console.log('File deleted!');
-      });
-    }
-    const item = await postModel.findByIdAndDelete({ _id: req.params.id });
-    res.status(200).json(item);
+app.get('/products', async (req, res) => {
+  try {
+    const items = await productModel.find({}).sort({ createdAt: -1 });
+    res.status(200).json(items);
+  } catch (error) {
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
+});
+
+app.post('/products', async (req, res) => {
+  try {
+    const newProduct = new productModel({
+      name: req.body.name,
+      description: req.body.description,
+      price: req.body.price,
+    });
+    await newProduct.save();
+    res.status(201).json(newProduct);
+  } catch (error) {
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
+});
+
+app.delete('/todos/:id', auth, async (req, res) => {
+  try {
+    const todo = await todoModel.findById(req.params.id);
+    if (!todo) return res.status(404).json({ message: 'Todo not found' });
+    if (todo.userId.toString() !== req.userId) return res.status(403).json({ message: 'Forbidden' });
+    await todoModel.findByIdAndDelete(req.params.id);
+    res.status(200).json({ message: 'Todo deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Internal Server Error' });
   }
 });
 
@@ -166,18 +159,31 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const fileName = Date.now() + '-' + file.originalname;
-    req.filePath = 'http://localhost:8080/images/' + fileName;
+    req.filePath = `http://localhost:8080/images/${fileName}`;
     cb(null, fileName);
   },
 });
 const upload = multer({ storage: storage });
 
-app.post('/post', auth, upload.single('file'), async (req, res) => {
-  const newPost = new postModel({
-    item: req.body.item,
-    file: req.filePath,
-    userId: req.userId,
-  });
-  await newPost.save();
-  res.status(201).json(newPost);
+app.post('/products', async (req, res) => {
+  try {
+    const newProduct = new productModel({
+      name: req.body.name,
+      description: req.body.description,
+      price: req.body.price,
+    });
+    await newProduct.save();
+    res.status(201).json(newProduct);
+  } catch (error) {
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
+});
+
+app.delete('/products/:id', async (req, res) => {
+  try {
+    await productModel.findByIdAndDelete(req.params.id);
+    res.status(200).json({ message: 'Product deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
 });
